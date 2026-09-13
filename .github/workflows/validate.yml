@@ -55,6 +55,9 @@ jobs:
           npm ci
           npm run lint
           npm run build
+          rm -rf ../cmd/server/ui
+          mkdir -p ../cmd/server/ui
+          cp -a dist/. ../cmd/server/ui/
 
       - name: Validate Go backend
         uses: actions/setup-go@v5

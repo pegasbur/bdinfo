@@ -69,6 +69,22 @@ The primary tested platform is AMD64 Unraid. The container can also run on a sta
 - React/TypeScript frontend embedded into a single static Go server binary
 - Minimal scratch-based runtime container
 
+## Screenshots
+
+<p align="center">
+  <a href="assets/screens/main-screen-light.png"><img src="assets/screens/main-screen-light.png" alt="Main screen light theme" width="13%"></a>
+  <a href="assets/screens/main-screen-dark.png"><img src="assets/screens/main-screen-dark.png" alt="Main screen dark theme" width="13%"></a>
+  <a href="assets/screens/source-browser-dark.png"><img src="assets/screens/source-browser-dark.png" alt="Source browser dark theme" width="13%"></a>
+  <a href="assets/screens/discovery-dark.png"><img src="assets/screens/discovery-dark.png" alt="Discovery screen dark theme" width="13%"></a>
+  <a href="assets/screens/scanning-dark.png"><img src="assets/screens/scanning-dark.png" alt="Scan in progress dark theme" width="13%"></a>
+  <a href="assets/screens/result-standard-dark.png"><img src="assets/screens/result-standard-dark.png" alt="Result screen standard dark theme" width="13%"></a>
+  <a href="assets/screens/result-summary-dark.png"><img src="assets/screens/result-summary-dark.png" alt="Result screen summary dark theme" width="13%"></a>
+</p>
+
+<p align="center">
+  <sub>Click any screenshot to view it full size.</sub>
+</p>
+
 ## Quick start on Unraid
 
 BDInfo is not yet listed in Community Applications. Until a CA submission is published, install the user template manually.

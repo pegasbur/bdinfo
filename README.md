@@ -1,11 +1,9 @@
 <p align="center">
   <a href="https://github.com/pegasbur/bdinfo">
-    <img src="assets/bdinfo-icon.png" alt="BDInfo" width="120" height="80">
-  </a>
+    <img src="assets/bdinfo-icon.png" alt="BDInfo" height="80"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://unraid.net/">
-    <img src="https://drive.google.com/thumbnail?id=1NfrtbOFIzg65KY1YeLBZSlTsuGQQCmbr&sz=w256" alt="Unraid" width="80" height="80">
-  </a>
+    <img src="https://drive.google.com/thumbnail?id=1NfrtbOFIzg65KY1YeLBZSlTsuGQQCmbr&sz=w256" alt="Unraid" width="80" height="80"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://github.com/autobrr/go-bdinfo">
     <img src="https://raw.githubusercontent.com/autobrr/autobrr/refs/heads/develop/.github/images/logo.png" alt="autobrr" width="80" height="80">
@@ -21,11 +19,9 @@
 
 <p align="center">
   <a href="https://github.com/pegasbur/bdinfo/actions/workflows/validate.yml">
-    <img alt="Repository validation" src="https://github.com/pegasbur/bdinfo/actions/workflows/validate.yml/badge.svg?branch=main">
-  </a>
+    <img alt="Repository validation" src="https://github.com/pegasbur/bdinfo/actions/workflows/validate.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/users/pegasbur/packages/container/package/bdinfo">
-    <img alt="Container image" src="https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white">
-  </a>
+    <img alt="Container image" src="https://img.shields.io/badge/GHCR-container-2496ED?logo=docker&logoColor=white"></a>
   <img alt="Unraid compatible" src="https://img.shields.io/badge/Unraid-compatible-F15A2C?logo=unraid&logoColor=white">
   <img alt="Architecture amd64" src="https://img.shields.io/badge/architecture-amd64-555555">
   <a href="LICENSE">

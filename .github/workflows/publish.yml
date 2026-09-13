@@ -1,0 +1,137 @@
+name: Publish container and release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sanitized public main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Read release pins
+        id: versions
+        shell: bash
+        run: |
+          set -a
+          source versions.env
+          set +a
+          test "$UPSTREAM_COMMIT" != "UNRESOLVED"
+          test "$UPSTREAM_SOURCE_SHA256" != "UNRESOLVED"
+          echo "GO_VERSION=$GO_VERSION" >> "$GITHUB_ENV"
+          echo "NODE_VERSION=$NODE_VERSION" >> "$GITHUB_ENV"
+          echo "DEBIAN_CODENAME=$DEBIAN_CODENAME" >> "$GITHUB_ENV"
+          echo "UPSTREAM_VERSION=$UPSTREAM_VERSION" >> "$GITHUB_ENV"
+          echo "UPSTREAM_COMMIT=$UPSTREAM_COMMIT" >> "$GITHUB_ENV"
+          echo "CONTAINER_REVISION=$CONTAINER_REVISION" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${UPSTREAM_VERSION}-r${CONTAINER_REVISION}" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=v${UPSTREAM_VERSION}-r${CONTAINER_REVISION}" >> "$GITHUB_ENV"
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/bdinfo"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "node=$NODE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "debian=$DEBIAN_CODENAME" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "upstream_commit=$UPSTREAM_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "revision=$CONTAINER_REVISION" >> "$GITHUB_OUTPUT"
+          echo "release_version=${UPSTREAM_VERSION}-r${CONTAINER_REVISION}" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse existing immutable release
+        shell: bash
+        run: |
+          if docker manifest inspect "$IMAGE:$RELEASE_VERSION" >/dev/null 2>&1; then
+            echo "Immutable image tag already exists: $IMAGE:$RELEASE_VERSION" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "GitHub release tag already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push immutable image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.versions.outputs.image }}:${{ steps.versions.outputs.release_version }}
+          build-args: |
+            GO_VERSION=${{ steps.versions.outputs.go }}
+            NODE_VERSION=${{ steps.versions.outputs.node }}
+            DEBIAN_CODENAME=${{ steps.versions.outputs.debian }}
+            APP_VERSION=${{ steps.versions.outputs.release_version }}
+            VCS_REF=${{ github.sha }}
+            UPSTREAM_VERSION=${{ steps.versions.outputs.upstream_version }}
+            UPSTREAM_COMMIT=${{ steps.versions.outputs.upstream_commit }}
+
+      - name: Pull and verify published image
+        env:
+          PUBLISHED_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$PUBLISHED_DIGEST"
+          PUBLISHED_IMAGE="$IMAGE@$PUBLISHED_DIGEST"
+          docker pull "$PUBLISHED_IMAGE"
+
+          test "$(docker inspect "$PUBLISHED_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$RELEASE_VERSION"
+          test "$(docker inspect "$PUBLISHED_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          test "$(docker inspect "$PUBLISHED_IMAGE" --format '{{ index .Config.Labels "io.pegasbur.bdinfo.upstream.version" }}')" = "$UPSTREAM_VERSION"
+          test "$(docker inspect "$PUBLISHED_IMAGE" --format '{{ index .Config.Labels "io.pegasbur.bdinfo.upstream.revision" }}')" = "$UPSTREAM_COMMIT"
+
+          mkdir -p "$RUNNER_TEMP/bdinfo-config" "$RUNNER_TEMP/bdinfo-data"
+          docker run -d --rm \
+            --name bdinfo-release-check \
+            -p 4646:4646 \
+            -v "$RUNNER_TEMP/bdinfo-config:/config" \
+            -v "$RUNNER_TEMP/bdinfo-data:/data:ro" \
+            "$PUBLISHED_IMAGE"
+          trap 'docker rm -f bdinfo-release-check >/dev/null 2>&1 || true' EXIT
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4646/api/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:4646/api/health
+
+      - name: Create moving aliases from verified immutable digest
+        env:
+          PUBLISHED_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          docker buildx imagetools create \
+            -t "$IMAGE:$UPSTREAM_VERSION" \
+            -t "$IMAGE:latest" \
+            "$IMAGE@$PUBLISHED_DIGEST"
+
+      - name: Create GitHub release and tag after image verification
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "BDInfo $RELEASE_VERSION" \
+            --generate-notes

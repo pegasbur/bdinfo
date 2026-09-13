@@ -1,0 +1,85 @@
+name: Validate repository
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version pins
+        id: versions
+        shell: bash
+        run: |
+          set -a
+          source versions.env
+          set +a
+          echo "GO_VERSION=$GO_VERSION" >> "$GITHUB_ENV"
+          echo "NODE_VERSION=$NODE_VERSION" >> "$GITHUB_ENV"
+          echo "DEBIAN_CODENAME=$DEBIAN_CODENAME" >> "$GITHUB_ENV"
+          echo "UPSTREAM_VERSION=$UPSTREAM_VERSION" >> "$GITHUB_ENV"
+          echo "UPSTREAM_COMMIT=$UPSTREAM_COMMIT" >> "$GITHUB_ENV"
+          echo "CONTAINER_REVISION=$CONTAINER_REVISION" >> "$GITHUB_ENV"
+          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "node=$NODE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Validate XML and repository metadata
+        run: |
+          python3 - <<'PY'
+          import pathlib, xml.etree.ElementTree as ET
+          ET.parse('unraid/my-bdinfo.xml')
+          text = pathlib.Path('go.mod').read_text()
+          version = pathlib.Path('versions.env').read_text()
+          assert 'github.com/autobrr/go-bdinfo v' in text
+          assert 'UPSTREAM_VERSION=' in version
+          assert 'UPSTREAM_COMMIT=UNRESOLVED' not in version
+          assert 'UPSTREAM_SOURCE_SHA256=UNRESOLVED' not in version
+          PY
+          git diff --check
+
+      - name: Validate frontend
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.versions.outputs.node }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Frontend lint and build
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: Validate Go backend
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.versions.outputs.go }}
+          cache: true
+
+      - name: Go format and tests
+        run: |
+          test -z "$(gofmt -l cmd)"
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+          go test ./cmd/server
+
+      - name: Validate Compose
+        run: docker compose -f compose.yaml config -q
+
+      - name: Build runtime image
+        run: |
+          docker build \
+            --build-arg "GO_VERSION=$GO_VERSION" \
+            --build-arg "NODE_VERSION=$NODE_VERSION" \
+            --build-arg "DEBIAN_CODENAME=$DEBIAN_CODENAME" \
+            --build-arg "APP_VERSION=${UPSTREAM_VERSION}-r${CONTAINER_REVISION}" \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
+            --build-arg "UPSTREAM_VERSION=${UPSTREAM_VERSION}" \
+            --build-arg "UPSTREAM_COMMIT=${UPSTREAM_COMMIT}" \
+            -t bdinfo-ci .

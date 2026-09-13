@@ -1,0 +1,10 @@
+services:
+  bdinfo:
+    image: ${IMAGE:-ghcr.io/pegasbur/bdinfo:latest}
+    container_name: ${CONTAINER_NAME:-bdinfo}
+    restart: unless-stopped
+    ports:
+      - "${WEBUI_PORT:-4646}:4646"
+    volumes:
+      - "${APPDATA_PATH:-./config}:/config"
+      - "${MEDIA_PATH:-/srv/media}:/data:ro"

@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<CommunityApplications>
+  <Profile>BDInfo provides a modern browser-based interface for Blu-ray structure and bitrate analysis powered by autobrr/go-bdinfo, with Docker and Unraid deployment support.</Profile>
+
+  <Icon>https://raw.githubusercontent.com/pegasbur/bdinfo/main/assets/bdinfo-icon.png</Icon>
+  <WebPage>https://github.com/pegasbur/bdinfo</WebPage>
+
+  <DonateLink>https://buymeacoffee.com/pegasbur</DonateLink>
+  <DonateText>Buy me a coffee</DonateText>
+</CommunityApplications>

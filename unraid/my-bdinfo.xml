@@ -1,28 +1,42 @@
 <?xml version="1.0"?>
 <Container version="2">
+  <Beta>False</Beta>
   <Name>BDInfo</Name>
   <Repository>ghcr.io/pegasbur/bdinfo:latest</Repository>
-  <Registry>https://ghcr.io/pegasbur/bdinfo</Registry>
+  <Registry>https://github.com/users/pegasbur/packages/container/package/bdinfo</Registry>
   <Network>bridge</Network>
   <MyIP/>
   <Privileged>false</Privileged>
+
   <Support>https://github.com/pegasbur/bdinfo/issues</Support>
   <Project>https://github.com/pegasbur/bdinfo</Project>
   <ReadMe>https://raw.githubusercontent.com/pegasbur/bdinfo/main/README.md</ReadMe>
   <License>GPL-2.0-or-later</License>
+
   <Overview>Modern browser-based Blu-ray structure and bitrate analysis powered by autobrr/go-bdinfo. Browse server-side BDMV folders and ISO images, discover playlists, scan bitrates, and export BDInfo reports.</Overview>
   <Category>MediaApp:Video Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:4646]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/pegasbur/bdinfo/main/unraid/my-bdinfo.xml</TemplateURL>
+
+  <TemplateURL>https://raw.githubusercontent.com/pegasbur/unraid-community-apps/main/templates/bdinfo.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/pegasbur/bdinfo/main/assets/bdinfo-icon.png</Icon>
+
   <ExtraParams/>
   <PostArgs/>
   <CPUset/>
   <DateInstalled/>
+
   <DonateText>Buy me a coffee</DonateText>
   <DonateLink>https://buymeacoffee.com/pegasbur</DonateLink>
   <Requires/>
-  <Config Name="WebUI Port" Target="4646" Default="4646" Mode="tcp" Description="Host port used to access the BDInfo WebUI." Type="Port" Display="always" Required="true" Mask="false">4646</Config>
-  <Config Name="Appdata" Target="/config" Default="/mnt/user/appdata/bdinfo" Mode="rw" Description="Persistent application configuration, including configured locations and favorites." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/bdinfo</Config>
-  <Config Name="Media" Target="/data" Default="/mnt/user/data" Mode="ro" Description="Blu-ray and media source root. The container only needs read access." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data</Config>
+
+  <Branch>
+    <Tag>latest</Tag>
+    <TagDescription>Latest tested stable BDInfo release.</TagDescription>
+  </Branch>
+
+  <Config Name="Web UI" Target="4646" Default="4646" Mode="tcp" Description="Browser interface over HTTP." Type="Port" Display="always" Required="true" Mask="false">4646</Config>
+
+  <Config Name="Appdata" Target="/config" Default="/mnt/user/appdata/bdinfo" Mode="rw" Description="Persistent BDInfo configuration, including locations, favorites, and application settings." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/bdinfo</Config>
+
+  <Config Name="Media" Target="/data" Default="/mnt/user/data" Mode="ro" Description="Blu-ray folders and ISO images. Select media under /data inside BDInfo. Source media is mounted read-only." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data</Config>
 </Container>

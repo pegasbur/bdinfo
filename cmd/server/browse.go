@@ -107,7 +107,7 @@ func handleBrowse(w http.ResponseWriter, r *http.Request) {
 				ModifiedAt: info.ModTime(),
 			})
 
-		case strings.EqualFold(filepath.Ext(resolved), ".iso"):
+		case info.Mode().IsRegular() && strings.EqualFold(filepath.Ext(resolved), ".iso"):
 			response.Entries = append(response.Entries, browseEntry{
 				Name:       entry.Name(),
 				Path:       resolved,

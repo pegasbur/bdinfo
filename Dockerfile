@@ -31,7 +31,9 @@ RUN CGO_ENABLED=0 GOOS=linux \
     -trimpath \
     -ldflags="-s -w" \
     -o /out/go-bdinfo \
-    ./cmd/server
+    ./cmd/server \
+ && mkdir -p /out/config \
+ && chown 99:100 /out/config
 
 
 FROM scratch
@@ -50,6 +52,9 @@ LABEL org.opencontainers.image.title="BDInfo" \
       io.pegasbur.bdinfo.upstream.revision="${UPSTREAM_COMMIT}"
 
 COPY --from=build /out/go-bdinfo /go-bdinfo
+COPY --from=build --chown=99:100 /out/config /config
+
+USER 99:100
 
 EXPOSE 4646
 

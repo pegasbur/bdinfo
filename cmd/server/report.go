@@ -15,31 +15,17 @@ type scanReportResponse struct {
 func handleScanReport(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
-		writeJSON(w, http.StatusNotFound, errorResponse{
-			Error: "scan job not found",
-		})
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "scan job not found"})
 		return
 	}
 
 	result, status, ok := getStoredScanResult(id)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, errorResponse{
-			Error: "scan job not found",
-		})
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "scan job not found"})
 		return
 	}
-
 	if status != "completed" || result == nil {
-		writeJSON(w, http.StatusConflict, errorResponse{
-			Error: "scan has not completed",
-		})
-		return
-	}
-
-	if strings.TrimSpace(result.Report) == "" {
-		writeJSON(w, http.StatusConflict, errorResponse{
-			Error: "scan report is unavailable",
-		})
+		writeJSON(w, http.StatusConflict, errorResponse{Error: "scan has not completed"})
 		return
 	}
 
@@ -47,70 +33,106 @@ func handleScanReport(w http.ResponseWriter, r *http.Request) {
 	if view == "" {
 		view = "standard"
 	}
-
 	switch view {
 	case "standard", "summary", "forums":
 	default:
-		writeJSON(w, http.StatusBadRequest, errorResponse{
-			Error: "view must be standard, summary, or forums",
-		})
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "view must be standard, summary, or forums"})
 		return
 	}
 
 	playlist := strings.TrimSpace(r.URL.Query().Get("playlist"))
-
-	report := result.Report
-
-	if playlist != "" {
-		canonical := ""
-
-		for _, candidate := range result.Playlists {
-			if strings.EqualFold(candidate.Name, playlist) {
-				canonical = candidate.Name
-				break
-			}
+	report, canonical, ok := selectStoredReport(result, playlist, view)
+	if !ok {
+		if playlist != "" {
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: "playlist report was not found"})
+		} else {
+			writeJSON(w, http.StatusConflict, errorResponse{Error: "scan report is unavailable"})
 		}
-
-		if canonical == "" {
-			writeJSON(w, http.StatusBadRequest, errorResponse{
-				Error: "playlist was not part of this scan",
-			})
-			return
-		}
-
-		selected, ok := extractPlaylistReport(report, canonical)
-		if !ok {
-			writeJSON(w, http.StatusNotFound, errorResponse{
-				Error: "playlist report was not found",
-			})
-			return
-		}
-
-		playlist = canonical
-		report = selected
-	}
-
-	switch view {
-	case "summary":
-		report = extractSummaryReports(report)
-
-	case "forums":
-		report = extractForumsReports(report)
+		return
 	}
 
 	if strings.TrimSpace(report) == "" {
-		writeJSON(w, http.StatusNotFound, errorResponse{
-			Error: view + " report was not found",
-		})
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: view + " report was not found"})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, scanReportResponse{
 		ID:       id,
 		View:     view,
-		Playlist: playlist,
+		Playlist: canonical,
 		Report:   report,
 	})
+}
+
+func selectStoredReport(result *scanResponse, requestedPlaylist, view string) (string, string, bool) {
+	if len(result.Reports) > 0 {
+		if requestedPlaylist != "" {
+			canonical := ""
+			for _, name := range result.ReportOrder {
+				if strings.EqualFold(name, requestedPlaylist) {
+					canonical = name
+					break
+				}
+			}
+			if canonical == "" {
+				return "", "", false
+			}
+			report := result.Reports[canonical]
+			return transformReportView(report, view), canonical, strings.TrimSpace(report) != ""
+		}
+
+		parts := make([]string, 0, len(result.ReportOrder))
+		for _, name := range result.ReportOrder {
+			report := strings.TrimSpace(result.Reports[name])
+			if report == "" {
+				continue
+			}
+			transformed := strings.TrimSpace(transformReportView(report, view))
+			if transformed != "" {
+				parts = append(parts, transformed)
+			}
+		}
+		if len(parts) == 0 {
+			return "", "", false
+		}
+		return strings.Join(parts, "\n\n") + "\n", "", true
+	}
+
+	report := result.Report
+	if strings.TrimSpace(report) == "" {
+		return "", "", false
+	}
+
+	canonical := ""
+	if requestedPlaylist != "" {
+		for _, candidate := range result.Playlists {
+			if strings.EqualFold(candidate.Name, requestedPlaylist) {
+				canonical = candidate.Name
+				break
+			}
+		}
+		if canonical == "" {
+			return "", "", false
+		}
+		selected, ok := extractPlaylistReport(report, canonical)
+		if !ok {
+			return "", "", false
+		}
+		report = selected
+	}
+
+	return transformReportView(report, view), canonical, true
+}
+
+func transformReportView(report, view string) string {
+	switch view {
+	case "summary":
+		return extractSummaryReports(report)
+	case "forums":
+		return extractForumsReports(report)
+	default:
+		return report
+	}
 }
 
 func getStoredScanResult(id string) (*scanResponse, string, bool) {
@@ -126,6 +148,9 @@ func getStoredScanResult(id string) (*scanResponse, string, bool) {
 		return nil, job.Status, true
 	}
 
+	// Results are immutable once a job reaches a terminal state, so a shallow
+	// struct copy is sufficient and avoids duplicating potentially large report
+	// strings/maps on every report request.
 	result := *job.Result
 	return &result, job.Status, true
 }

@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -59,12 +60,18 @@ type PlaylistInfo = {
   IsValid: boolean
 }
 
+type ScanInfo = {
+  ScanError?: string
+  FileErrors?: Record<string, string>
+}
+
 type DiscoverResponse = {
   disc: DiscInfo
   playlists: PlaylistInfo[]
   mainPlaylist?: PlaylistInfo
   validPlaylistCount: number
   filteredPlaylistCount: number
+  scan: ScanInfo
   durationMs: number
 }
 
@@ -94,6 +101,7 @@ type ScanProgress = {
 type ScanResult = {
   disc: DiscInfo
   playlists: PlaylistInfo[]
+  scan: ScanInfo
   durationMs: number
 }
 
@@ -374,6 +382,40 @@ function reportLineClass(line: string) {
   return ''
 }
 
+function scanInfoMessages(scan?: ScanInfo) {
+  if (!scan) {
+    return []
+  }
+
+  const messages: string[] = []
+  if (scan.ScanError?.trim()) {
+    messages.push(scan.ScanError.trim())
+  }
+  for (const [name, message] of Object.entries(scan.FileErrors ?? {})) {
+    if (message?.trim()) {
+      messages.push(`${name}: ${message.trim()}`)
+    }
+  }
+  return messages
+}
+
+const activeScanIDKey = 'bdinfo-active-scan-id-v1'
+const activeScanContextKey = 'bdinfo-active-scan-context-v1'
+
+function isActiveScanStatus(status: ScanJob['status']) {
+  return ['queued', 'running', 'cancelling'].includes(status)
+}
+
+function clearStoredActiveScan(jobID: string) {
+  if (localStorage.getItem(activeScanIDKey) !== jobID) {
+    return false
+  }
+
+  localStorage.removeItem(activeScanIDKey)
+  localStorage.removeItem(activeScanContextKey)
+  return true
+}
+
 function App() {
   const [sourcePath, setSourcePath] = useState('')
   const [discovery, setDiscovery] =
@@ -387,7 +429,16 @@ function App() {
     useState<string[]>([])
   const [scanJob, setScanJob] =
     useState<ScanJob | null>(null)
+  const cancelRequestTarget = useRef<string | null>(null)
   const [scanError, setScanError] = useState('')
+  const [scanSubmitting, setScanSubmitting] = useState(false)
+  const [scanRecovering, setScanRecovering] = useState(
+    () => Boolean(localStorage.getItem(activeScanIDKey)),
+  )
+
+  const browseRequest = useRef<AbortController | null>(null)
+  const discoverRequest = useRef<AbortController | null>(null)
+  const reportRequest = useRef<AbortController | null>(null)
 
   const [reportView, setReportView] =
     useState<ReportView>('standard')
@@ -465,10 +516,14 @@ function App() {
     })
 
   useEffect(() => {
-    localStorage.setItem(
-      'bdinfo-browser-column-widths-v1',
-      JSON.stringify(columnWidths),
-    )
+    const timer = window.setTimeout(() => {
+      localStorage.setItem(
+        'bdinfo-browser-column-widths-v1',
+        JSON.stringify(columnWidths),
+      )
+    }, 200)
+
+    return () => window.clearTimeout(timer)
   }, [columnWidths])
 
   useEffect(() => {
@@ -514,12 +569,7 @@ function App() {
     } catch {
       // Ignore notification display errors.
     }
-  }, [
-    scanJob?.id,
-    scanJob?.status,
-    scanNotifications,
-    notificationsSupported,
-  ])
+  }, [scanJob, scanNotifications, notificationsSupported])
 
   useEffect(() => {
     if (
@@ -531,49 +581,230 @@ function App() {
       return
     }
 
+    const jobID = scanJob.id
+    const controller = new AbortController()
     let requestRunning = false
+    let disposed = false
 
-    const interval = window.setInterval(async () => {
-      if (requestRunning) {
+    const poll = async () => {
+      if (requestRunning || disposed) {
         return
       }
-
       requestRunning = true
-
       try {
         const response = await fetch(
-          `/api/scans/${encodeURIComponent(scanJob.id)}`,
+          `/api/scans/${encodeURIComponent(jobID)}`,
+          { signal: controller.signal },
         )
-
+        if (response.status === 404) {
+          if (disposed) {
+            return
+          }
+          clearStoredActiveScan(jobID)
+          if (cancelRequestTarget.current === jobID) {
+            cancelRequestTarget.current = null
+          }
+          setScanJob((current) =>
+            current?.id === jobID ? null : current,
+          )
+          setScanError(
+            'Scan job is no longer available; the server may have restarted',
+          )
+          return
+        }
         if (!response.ok) {
           throw new Error(await readAPIError(response))
         }
-
         const job = (await response.json()) as ScanJob
-        setScanJob(job)
-
+        if (disposed) {
+          return
+        }
+        if (
+          !isActiveScanStatus(job.status) &&
+          cancelRequestTarget.current === jobID
+        ) {
+          cancelRequestTarget.current = null
+        }
+        setScanJob((current) =>
+          current?.id === jobID ? job : current,
+        )
         if (job.status === 'failed') {
           setScanError(job.error || 'Scan failed')
-        }
-
-        if (job.status === 'cancelled') {
+        } else {
           setScanError('')
         }
       } catch (error) {
-        setScanError(
-          error instanceof Error
-            ? error.message
-            : 'Unable to read scan status',
-        )
+        if (!disposed && !(error instanceof DOMException && error.name === 'AbortError')) {
+          setScanError(
+            error instanceof Error
+              ? error.message
+              : 'Unable to read scan status',
+          )
+        }
       } finally {
         requestRunning = false
       }
-    }, 650)
+    }
+
+    void poll()
+    const interval = window.setInterval(() => void poll(), 650)
 
     return () => {
+      disposed = true
+      controller.abort()
       window.clearInterval(interval)
     }
   }, [scanJob?.id, scanJob?.status])
+
+  useEffect(() => {
+    const storedID = localStorage.getItem(activeScanIDKey)
+    if (!storedID) {
+      return
+    }
+
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/api/scans/${encodeURIComponent(storedID)}`,
+          { signal: controller.signal },
+        )
+        if (controller.signal.aborted) {
+          return
+        }
+        if (response.status === 404) {
+          clearStoredActiveScan(storedID)
+          return
+        }
+        if (!response.ok) {
+          throw new Error(await readAPIError(response))
+        }
+        const job = (await response.json()) as ScanJob
+        if (
+          controller.signal.aborted ||
+          localStorage.getItem(activeScanIDKey) !== storedID
+        ) {
+          return
+        }
+
+        let context: {
+          jobID?: string
+          sourcePath?: string
+          discovery?: DiscoverResponse
+          scanMode?: ScanMode
+          selectedPlaylistNames?: string[]
+        } = {}
+        try {
+          context = JSON.parse(
+            localStorage.getItem(activeScanContextKey) || '{}',
+          ) as typeof context
+        } catch {
+          context = {}
+        }
+
+        if (
+          controller.signal.aborted ||
+          localStorage.getItem(activeScanIDKey) !== storedID
+        ) {
+          return
+        }
+
+        const contextMatchesJob = context.jobID === storedID
+        setSourcePath(
+          contextMatchesJob && context.sourcePath
+            ? context.sourcePath
+            : job.request.path,
+        )
+        if (contextMatchesJob && context.discovery) {
+          setDiscovery(context.discovery)
+        }
+        if (contextMatchesJob && context.scanMode) {
+          setScanMode(context.scanMode)
+        }
+        if (contextMatchesJob && context.selectedPlaylistNames) {
+          setSelectedPlaylistNames(context.selectedPlaylistNames)
+        }
+        setScanJob(job)
+      } catch (error) {
+        if (
+          !controller.signal.aborted &&
+          localStorage.getItem(activeScanIDKey) === storedID &&
+          !(error instanceof DOMException && error.name === 'AbortError')
+        ) {
+          setScanError(
+            error instanceof Error
+              ? error.message
+              : 'Unable to restore active scan',
+          )
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setScanRecovering(false)
+        }
+      }
+    })()
+
+    return () => controller.abort()
+  }, [])
+
+  const loadScanReport = useCallback(async (
+    jobID: string,
+    view: ReportView,
+    playlist: string,
+  ) => {
+    reportRequest.current?.abort()
+    const controller = new AbortController()
+    reportRequest.current = controller
+    setReportLoading(true)
+    setReportError('')
+    setReportCopied(false)
+
+    try {
+      const params = new URLSearchParams()
+      params.set('view', view)
+      if (playlist) {
+        params.set('playlist', playlist)
+      }
+      const response = await fetch(
+        `/api/scans/${encodeURIComponent(jobID)}/report?${params.toString()}`,
+        { signal: controller.signal },
+      )
+      if (!response.ok) {
+        throw new Error(await readAPIError(response))
+      }
+      const data = (await response.json()) as ScanReportResponse
+      if (reportRequest.current !== controller) {
+        return
+      }
+      setScanReport(data.report)
+    } catch (error) {
+      if (
+        reportRequest.current === controller &&
+        !(error instanceof DOMException && error.name === 'AbortError')
+      ) {
+        setScanReport('')
+        setReportError(
+          error instanceof Error
+            ? error.message
+            : 'Unable to load scan report',
+        )
+      }
+    } finally {
+      if (reportRequest.current === controller) {
+        reportRequest.current = null
+        setReportLoading(false)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (scanJob && ['completed', 'failed', 'cancelled'].includes(scanJob.status)) {
+      clearStoredActiveScan(scanJob.id)
+      if (cancelRequestTarget.current === scanJob.id) {
+        cancelRequestTarget.current = null
+      }
+    }
+  }, [scanJob])
 
   useEffect(() => {
     if (
@@ -583,16 +814,21 @@ function App() {
       return
     }
 
-    void loadScanReport(
-      scanJob.id,
-      reportView,
-      reportPlaylist,
-    )
+    const timer = window.setTimeout(() => {
+      void loadScanReport(
+        scanJob.id,
+        reportView,
+        reportPlaylist,
+      )
+    }, 0)
+
+    return () => window.clearTimeout(timer)
   }, [
     scanJob?.id,
     scanJob?.status,
     reportView,
     reportPlaylist,
+    loadScanReport,
   ])
 
   const loadNavigation = async () => {
@@ -639,6 +875,9 @@ function App() {
   }
 
   const loadBrowser = async (path?: string) => {
+    browseRequest.current?.abort()
+    const controller = new AbortController()
+    browseRequest.current = controller
     setBrowseLoading(true)
     setBrowseError('')
     setSearch('')
@@ -647,27 +886,35 @@ function App() {
       const query = path
         ? `?path=${encodeURIComponent(path)}`
         : ''
-
-      const response = await fetch(`/api/browse${query}`)
-
+      const response = await fetch(`/api/browse${query}`, {
+        signal: controller.signal,
+      })
       if (!response.ok) {
         throw new Error(await readAPIError(response))
       }
-
-      const data =
-        (await response.json()) as BrowseResponse
-
+      const data = (await response.json()) as BrowseResponse
+      if (browseRequest.current !== controller) {
+        return
+      }
       setBrowsePath(data.path)
       setBrowseParent(data.parent ?? '')
       setBrowseEntries(data.entries ?? [])
     } catch (error) {
-      setBrowseError(
-        error instanceof Error
-          ? error.message
-          : 'Unable to browse this location',
-      )
+      if (
+        browseRequest.current === controller &&
+        !(error instanceof DOMException && error.name === 'AbortError')
+      ) {
+        setBrowseError(
+          error instanceof Error
+            ? error.message
+            : 'Unable to browse this location',
+        )
+      }
     } finally {
-      setBrowseLoading(false)
+      if (browseRequest.current === controller) {
+        browseRequest.current = null
+        setBrowseLoading(false)
+      }
     }
   }
 
@@ -681,6 +928,11 @@ function App() {
   }
 
   const discoverSource = async (path: string) => {
+    discoverRequest.current?.abort()
+    reportRequest.current?.abort()
+    const controller = new AbortController()
+    discoverRequest.current = controller
+
     setDiscovering(true)
     setDiscoverError('')
     setDiscovery(null)
@@ -697,44 +949,52 @@ function App() {
     try {
       const response = await fetch('/api/discover', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          path,
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+        signal: controller.signal,
       })
-
       if (!response.ok) {
         throw new Error(await readAPIError(response))
       }
-
-      const data =
-        (await response.json()) as DiscoverResponse
-
+      const data = (await response.json()) as DiscoverResponse
+      if (discoverRequest.current !== controller) {
+        return
+      }
       setDiscovery(data)
-
       const initialPlaylist =
         data.mainPlaylist?.Name ||
         data.playlists.find((playlist) => playlist.IsValid)?.Name ||
         data.playlists[0]?.Name ||
         ''
-
       setSelectedPlaylistNames(
         initialPlaylist ? [initialPlaylist] : [],
       )
     } catch (error) {
-      setDiscoverError(
-        error instanceof Error
-          ? error.message
-          : 'Discovery failed',
-      )
+      if (
+        discoverRequest.current === controller &&
+        !(error instanceof DOMException && error.name === 'AbortError')
+      ) {
+        setDiscoverError(
+          error instanceof Error ? error.message : 'Discovery failed',
+        )
+      }
     } finally {
-      setDiscovering(false)
+      if (discoverRequest.current === controller) {
+        discoverRequest.current = null
+        setDiscovering(false)
+      }
     }
   }
 
   const selectSource = async (path: string) => {
+    if (scanRecovering) {
+      setScanError('Wait for active scan recovery before selecting another source')
+      return
+    }
+    if (scanActive || scanSubmitting) {
+      setScanError('Cancel the active scan before selecting another source')
+      return
+    }
     setSourcePath(path)
     setBrowserOpen(false)
     await discoverSource(path)
@@ -771,48 +1031,7 @@ function App() {
     setScanNotifications(true)
   }
 
-  const loadScanReport = async (
-    jobID: string,
-    view: ReportView,
-    playlist: string,
-  ) => {
-    setReportLoading(true)
-    setReportError('')
-    setReportCopied(false)
 
-    try {
-      const params = new URLSearchParams()
-      params.set('view', view)
-
-      if (playlist) {
-        params.set('playlist', playlist)
-      }
-
-      const response = await fetch(
-        `/api/scans/${encodeURIComponent(
-          jobID,
-        )}/report?${params.toString()}`,
-      )
-
-      if (!response.ok) {
-        throw new Error(await readAPIError(response))
-      }
-
-      const data =
-        (await response.json()) as ScanReportResponse
-
-      setScanReport(data.report)
-    } catch (error) {
-      setScanReport('')
-      setReportError(
-        error instanceof Error
-          ? error.message
-          : 'Unable to load scan report',
-      )
-    } finally {
-      setReportLoading(false)
-    }
-  }
 
   const copyScanReport = async () => {
     if (!scanReport) {
@@ -884,8 +1103,13 @@ function App() {
     const label =
       discovery?.disc.Label?.trim() || 'BDInfo'
 
-    const safeLabel = label
-      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
+    const safeLabel = Array.from(label, (character) => {
+      const codePoint = character.codePointAt(0) ?? 0
+      return codePoint < 32 || '<>:"/\\|?*'.includes(character)
+        ? '_'
+        : character
+    })
+      .join('')
       .replace(/\s+/g, ' ')
       .trim()
 
@@ -916,7 +1140,7 @@ function App() {
   }
 
   const startScan = async () => {
-    if (!sourcePath || !discovery) {
+    if (!sourcePath || !discovery || scanSubmitting || scanActive) {
       return
     }
 
@@ -935,6 +1159,7 @@ function App() {
     }
 
     setScanError('')
+    setScanSubmitting(true)
 
     try {
       const request: {
@@ -963,26 +1188,42 @@ function App() {
       }
 
       const job = (await response.json()) as ScanJob
+      cancelRequestTarget.current = null
       setScanJob(job)
+      localStorage.setItem(activeScanIDKey, job.id)
+      localStorage.setItem(
+        activeScanContextKey,
+        JSON.stringify({
+          jobID: job.id,
+          sourcePath,
+          discovery,
+          scanMode,
+          selectedPlaylistNames,
+        }),
+      )
     } catch (error) {
       setScanError(
         error instanceof Error
           ? error.message
           : 'Unable to start scan',
       )
+    } finally {
+      setScanSubmitting(false)
     }
   }
 
   const cancelScan = async () => {
-    if (!scanJob?.id) {
+    if (!scanJob?.id || !isActiveScanStatus(scanJob.status)) {
       return
     }
 
+    const targetJobID = scanJob.id
+    cancelRequestTarget.current = targetJobID
     setScanError('')
 
     try {
       const response = await fetch(
-        `/api/scans/${encodeURIComponent(scanJob.id)}`,
+        `/api/scans/${encodeURIComponent(targetJobID)}`,
         {
           method: 'DELETE',
         },
@@ -993,8 +1234,28 @@ function App() {
       }
 
       const job = (await response.json()) as ScanJob
-      setScanJob(job)
+      if (
+        cancelRequestTarget.current !== targetJobID ||
+        localStorage.getItem(activeScanIDKey) !== targetJobID
+      ) {
+        return
+      }
+      setScanJob((latest) =>
+        latest?.id === targetJobID && isActiveScanStatus(latest.status)
+          ? job
+          : latest,
+      )
+      if (!isActiveScanStatus(job.status)) {
+        cancelRequestTarget.current = null
+      }
     } catch (error) {
+      if (
+        cancelRequestTarget.current !== targetJobID ||
+        localStorage.getItem(activeScanIDKey) !== targetJobID
+      ) {
+        return
+      }
+      cancelRequestTarget.current = null
       setScanError(
         error instanceof Error
           ? error.message
@@ -1016,43 +1277,59 @@ function App() {
 
     setFavoritesError('')
 
-    const response = await fetch('/api/favorites', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        name: name || basename(path),
-        path,
-      }),
-    })
+    try {
+      const response = await fetch('/api/favorites', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: name || basename(path),
+          path,
+        }),
+      })
 
-    if (!response.ok) {
-      setFavoritesError(await readAPIError(response))
-      return
+      if (!response.ok) {
+        setFavoritesError(await readAPIError(response))
+        return
+      }
+
+      await loadNavigation()
+    } catch (error) {
+      setFavoritesError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to add favorite',
+      )
     }
-
-    await loadNavigation()
   }
 
   const removeFavorite = async (favorite: Favorite) => {
     setFavoritesError('')
 
-    const response = await fetch(
-      `/api/favorites/${encodeURIComponent(
-        favorite.id,
-      )}`,
-      {
-        method: 'DELETE',
-      },
-    )
+    try {
+      const response = await fetch(
+        `/api/favorites/${encodeURIComponent(
+          favorite.id,
+        )}`,
+        {
+          method: 'DELETE',
+        },
+      )
 
-    if (!response.ok) {
-      setFavoritesError(await readAPIError(response))
-      return
+      if (!response.ok) {
+        setFavoritesError(await readAPIError(response))
+        return
+      }
+
+      await loadNavigation()
+    } catch (error) {
+      setFavoritesError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to remove favorite',
+      )
     }
-
-    await loadNavigation()
   }
 
   const toggleFavorite = async (entry: BrowseEntry) => {
@@ -1293,11 +1570,17 @@ function App() {
     96
 
   const scanActive =
-    scanJob !== null &&
-    ['queued', 'running', 'cancelling'].includes(scanJob.status)
+    scanJob !== null && isActiveScanStatus(scanJob.status)
 
   const scanCompleted =
     scanJob?.status === 'completed'
+
+  const discoveryWarnings = scanInfoMessages(discovery?.scan)
+  const scanWarnings = scanInfoMessages(scanJob?.result?.scan)
+  const reportLines = useMemo(
+    () => scanReport.split('\n'),
+    [scanReport],
+  )
 
   const scanPercent = Math.min(
     100,
@@ -1425,7 +1708,7 @@ function App() {
           <div
             className={[
               'readyBadge',
-              discovering
+              scanRecovering || discovering
                 ? 'discovering'
                 : scanActive
                   ? 'scanning'
@@ -1434,9 +1717,11 @@ function App() {
                     : 'ready',
             ].join(' ')}
           >
-            {discovering
-              ? 'Discovering'
-              : scanActive
+            {scanRecovering
+              ? 'Restoring'
+              : discovering
+                ? 'Discovering'
+                : scanActive
                 ? 'Scanning'
                 : discoverError || scanError
                   ? 'Error'
@@ -1455,6 +1740,7 @@ function App() {
           <button
             type="button"
             className="secondaryButton"
+            disabled={scanRecovering || scanActive || scanSubmitting || discovering}
             onClick={() => void showBrowser()}
           >
             Browse
@@ -1470,6 +1756,7 @@ function App() {
         <button
           type="button"
           className="panel sourceEmptyPicker"
+          disabled={scanRecovering || scanActive || scanSubmitting || discovering}
           onClick={() => void showBrowser()}
         >
           <strong>Select a Blu-ray source</strong>
@@ -1477,6 +1764,12 @@ function App() {
             Disc details and playlists will appear here immediately after discovery.
           </span>
         </button>
+      )}
+
+      {scanRecovering && (
+        <section className="panel discoveryMessage">
+          Restoring active scan…
+        </section>
       )}
 
       {discovering && (
@@ -1493,6 +1786,15 @@ function App() {
 
       {discovery && (
         <>
+          {discoveryWarnings.length > 0 && (
+            <section className="panel warningPanel">
+              <strong>Discovery warnings</strong>
+              {discoveryWarnings.map((warning) => (
+                <span key={warning}>{warning}</span>
+              ))}
+            </section>
+          )}
+
           <section className="panel">
             <div className="sectionHeading discSectionHeading">
               <h2>Disc Details</h2>
@@ -1765,7 +2067,11 @@ function App() {
             </div>
           </section>
 
-          <section className="panel scanPanel">
+        </>
+      )}
+
+      {(discovery || scanJob || scanError) && (
+        <section className="panel scanPanel">
             <div className="scanPanelHeader">
               <div className="scanPrimary">
                 <div className="scanPrimaryTopRow">
@@ -1779,8 +2085,10 @@ function App() {
                     disabled={
                       scanActive
                         ? scanJob?.status === 'cancelling'
-                        : scanMode === 'selected' &&
-                          selectedPlaylistNames.length === 0
+                        : !discovery ||
+                          scanSubmitting ||
+                          (scanMode === 'selected' &&
+                          selectedPlaylistNames.length === 0)
                     }
                     onClick={() =>
                       scanActive
@@ -1792,9 +2100,11 @@ function App() {
                       ? scanJob?.status === 'cancelling'
                         ? 'Cancelling…'
                         : 'Cancel'
-                      : scanCompleted
-                        ? 'Scan Again'
-                        : 'Scan Bitrates'}
+                      : scanSubmitting
+                        ? 'Starting…'
+                        : scanCompleted
+                          ? 'Scan Again'
+                          : 'Scan Bitrates'}
                   </button>
 
                   <span className="scanPrimaryHelper">
@@ -1840,7 +2150,7 @@ function App() {
                         ? 'scanScopeButton active'
                         : 'scanScopeButton'
                     }
-                    disabled={scanActive}
+                    disabled={scanActive || !discovery}
                     onClick={() => setScanMode('main')}
                   >
                     Main
@@ -1853,7 +2163,7 @@ function App() {
                         ? 'scanScopeButton active'
                         : 'scanScopeButton'
                     }
-                    disabled={scanActive}
+                    disabled={scanActive || !discovery}
                     onClick={() => setScanMode('selected')}
                   >
                     Select
@@ -1866,7 +2176,7 @@ function App() {
                         ? 'scanScopeButton active'
                         : 'scanScopeButton'
                     }
-                    disabled={scanActive}
+                    disabled={scanActive || !discovery}
                     onClick={() => setScanMode('all')}
                   >
                     All
@@ -1905,7 +2215,7 @@ function App() {
               </div>
             </div>
 
-            {scanMode === 'selected' && (
+            {discovery && scanMode === 'selected' && (
               <div className="selectedScanPlaylist">
                 <span>
                   {selectedPlaylistNames.length} selected
@@ -2033,7 +2343,17 @@ function App() {
             )}
 
 
-          </section>
+        </section>
+      )}
+
+      {scanCompleted && scanWarnings.length > 0 && (
+            <section className="panel warningPanel">
+              <strong>Scan warnings</strong>
+              {scanWarnings.map((warning) => (
+                <span key={warning}>{warning}</span>
+              ))}
+            </section>
+          )}
 
           {scanCompleted && scanJob && (
             <section className="panel reportPanel">
@@ -2185,7 +2505,7 @@ function App() {
                         : 'reportText'
                     }
                   >
-                    {scanReport.split('\n').map((line, index) => (
+                    {reportLines.map((line, index) => (
                       <span
                         key={index}
                         className={reportLineClass(line)}
@@ -2204,8 +2524,6 @@ function App() {
                 )}
               </div>
             </section>
-          )}
-        </>
       )}
 
       {browserOpen && (

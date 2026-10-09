@@ -28,11 +28,10 @@ jobs:
           echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
           echo "node=$NODE_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Validate XML and repository metadata
+      - name: Validate repository metadata
         run: |
           python3 - <<'PY'
-          import pathlib, xml.etree.ElementTree as ET
-          ET.parse('unraid/my-bdinfo.xml')
+          import pathlib
           text = pathlib.Path('go.mod').read_text()
           version = pathlib.Path('versions.env').read_text()
           assert 'github.com/autobrr/go-bdinfo v' in text

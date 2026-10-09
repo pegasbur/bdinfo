@@ -411,9 +411,9 @@ func handleCreateFavorite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !info.IsDir() && !strings.EqualFold(filepath.Ext(resolved), ".iso") {
+	if !info.IsDir() && (!info.Mode().IsRegular() || !strings.EqualFold(filepath.Ext(resolved), ".iso")) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{
-			Error: "favorite must be a directory or ISO file",
+			Error: "favorite must be a directory or regular ISO file",
 		})
 		return
 	}

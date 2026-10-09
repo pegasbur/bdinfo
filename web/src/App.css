@@ -156,6 +156,30 @@ button {
   color: #e3a1aa;
 }
 
+.warningPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-color: #66532a;
+  background: #211d13;
+  color: #e8d59b;
+  font-size: 12px;
+}
+
+.warningPanel strong {
+  color: #f0dd9d;
+}
+
+:root[data-theme='light'] .warningPanel {
+  border-color: #d8bd73;
+  background: #fff8e4;
+  color: #705919;
+}
+
+:root[data-theme='light'] .warningPanel strong {
+  color: #5d480d;
+}
+
 .sectionHeading {
   margin-bottom: 18px;
 }

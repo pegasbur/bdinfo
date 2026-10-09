@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -83,6 +84,96 @@ var scanJobs = struct {
 	jobs: make(map[string]*scanJob),
 }
 
+const (
+	finishedJobTTL          = 6 * time.Hour
+	maxRetainedFinishedJobs = 8
+	maxRetainedReportBytes  = 64 * 1024 * 1024
+)
+
+func terminalScanStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasActiveScan() bool {
+	scanJobs.Lock()
+	defer scanJobs.Unlock()
+	pruneFinishedJobsLocked(time.Now())
+	for _, job := range scanJobs.jobs {
+		if !terminalScanStatus(job.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+func scanResultBytes(result *scanResponse) int {
+	if result == nil {
+		return 0
+	}
+	if len(result.Reports) > 0 {
+		total := 0
+		for _, report := range result.Reports {
+			total += len(report)
+		}
+		return total
+	}
+	return len(result.Report)
+}
+
+func pruneFinishedJobsLocked(now time.Time) {
+	finished := make([]*scanJob, 0, len(scanJobs.jobs))
+	for _, job := range scanJobs.jobs {
+		if terminalScanStatus(job.Status) {
+			finished = append(finished, job)
+		}
+	}
+	if len(finished) <= 1 {
+		return
+	}
+
+	sort.Slice(finished, func(i, j int) bool {
+		iTime := finished[i].CreatedAt
+		jTime := finished[j].CreatedAt
+		if finished[i].FinishedAt != nil {
+			iTime = *finished[i].FinishedAt
+		}
+		if finished[j].FinishedAt != nil {
+			jTime = *finished[j].FinishedAt
+		}
+		return iTime.After(jTime)
+	})
+
+	retained := 0
+	retainedBytes := 0
+	for index, job := range finished {
+		finishedAt := job.CreatedAt
+		if job.FinishedAt != nil {
+			finishedAt = *job.FinishedAt
+		}
+		bytes := scanResultBytes(job.Result)
+
+		// Always keep the newest finished job so a large but valid report remains
+		// retrievable immediately after completion.
+		keep := index == 0
+		if !keep {
+			keep = now.Sub(finishedAt) <= finishedJobTTL &&
+				retained < maxRetainedFinishedJobs &&
+				(retainedBytes+bytes <= maxRetainedReportBytes || bytes == 0)
+		}
+		if keep {
+			retained++
+			retainedBytes += bytes
+			continue
+		}
+		delete(scanJobs.jobs, job.ID)
+	}
+}
+
 func runScanWorkerIfRequested() bool {
 	if len(os.Args) < 2 || os.Args[1] != "_scan-worker" {
 		return false
@@ -126,6 +217,10 @@ func executeScanWorker() error {
 		})
 		return err
 	}
+	if err := validateEngineSource(source); err != nil {
+		_ = protocol.send(workerMessage{Type: "error", Error: err.Error()})
+		return err
+	}
 
 	req.Mode = strings.ToLower(strings.TrimSpace(req.Mode))
 	if req.Mode == "" {
@@ -138,10 +233,7 @@ func executeScanWorker() error {
 
 	switch req.Mode {
 	case "main":
-		discovery, err := bdinfo.DiscoverPlaylists(context.Background(), bdinfo.Options{
-			Path:     source,
-			Settings: settings,
-		})
+		discovery, err := discoverPlaylistsBounded(context.Background(), source)
 		if err != nil {
 			msg := "playlist discovery failed: " + err.Error()
 			_ = protocol.send(workerMessage{Type: "error", Error: msg})
@@ -259,12 +351,7 @@ func resolveRequestedPlaylists(
 	source string,
 	requested []string,
 ) ([]string, error) {
-	settings := bdinfo.DefaultSettings(".")
-
-	discovery, err := bdinfo.DiscoverPlaylists(ctx, bdinfo.Options{
-		Path:     source,
-		Settings: settings,
-	})
+	discovery, err := discoverPlaylistsBounded(ctx, source)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"playlist discovery failed: %w",
@@ -319,15 +406,7 @@ func runSelectedScan(
 		)
 	}
 
-	settings := bdinfo.DefaultSettings(".")
-
-	discovery, err := bdinfo.DiscoverPlaylists(
-		context.Background(),
-		bdinfo.Options{
-			Path:     source,
-			Settings: settings,
-		},
-	)
+	discovery, err := discoverPlaylistsBounded(context.Background(), source)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"playlist discovery failed: %w",
@@ -336,42 +415,30 @@ func runSelectedScan(
 	}
 
 	byName := make(map[string]bdinfo.PlaylistInfo)
-
 	for _, playlist := range discovery.Playlists {
 		byName[strings.ToLower(playlist.Name)] = playlist
 	}
 
 	selected := make([]bdinfo.PlaylistInfo, 0, len(requested))
 	seen := make(map[string]bool)
-
 	for _, requestedName := range requested {
-		playlist, ok := byName[strings.ToLower(
-			strings.TrimSpace(requestedName),
-		)]
+		playlist, ok := byName[strings.ToLower(strings.TrimSpace(requestedName))]
 		if !ok {
-			return nil, fmt.Errorf(
-				"playlist %q was not found on this disc",
-				requestedName,
-			)
+			return nil, fmt.Errorf("playlist %q was not found on this disc", requestedName)
 		}
-
 		key := strings.ToLower(playlist.Name)
 		if seen[key] {
 			continue
 		}
-
 		seen[key] = true
 		selected = append(selected, playlist)
 	}
 
 	if len(selected) == 0 {
-		return nil, errors.New(
-			"no selected playlists were found on this disc",
-		)
+		return nil, errors.New("no selected playlists were found on this disc")
 	}
 
 	var totalBytes uint64
-
 	for _, playlist := range selected {
 		if playlist.SizeBytes > 0 {
 			totalBytes += uint64(playlist.SizeBytes)
@@ -379,8 +446,9 @@ func runSelectedScan(
 	}
 
 	var completedBytes uint64
-	var combined scanResponse
-	var report strings.Builder
+	combined := scanResponse{
+		Reports: make(map[string]string, len(selected)),
+	}
 
 	for index, playlist := range selected {
 		playlistSettings := bdinfo.DefaultSettings(".")
@@ -397,14 +465,10 @@ func runSelectedScan(
 				Settings:   playlistSettings,
 				OnProgress: func(event bdinfo.ProgressEvent) {
 					adjusted := event
-
-					adjusted.ProcessedBytes =
-						completedBytes + event.ProcessedBytes
-
+					adjusted.ProcessedBytes = completedBytes + event.ProcessedBytes
 					if totalBytes > 0 {
 						adjusted.TotalBytes = totalBytes
 					}
-
 					_ = protocol.send(workerMessage{
 						Type:                  "progress",
 						Progress:              &adjusted,
@@ -416,32 +480,21 @@ func runSelectedScan(
 			},
 		)
 		if err != nil {
-			return nil, fmt.Errorf(
-				"scan %s: %w",
-				playlist.Name,
-				err,
-			)
+			return nil, fmt.Errorf("scan %s: %w", playlist.Name, err)
 		}
 
 		normalizeDiscInfo(source, &result.Disc)
+		result.Report = normalizeReportDiscLabel(source, result.Report)
 
 		if index == 0 {
 			combined.Disc = result.Disc
-			combined.Scan = result.Scan
 		}
+		mergeScanInfo(&combined.Scan, result.Scan, playlist.Name)
+		combined.Playlists = append(combined.Playlists, result.Playlists...)
 
-		combined.Playlists = append(
-			combined.Playlists,
-			result.Playlists...,
-		)
-
-		if strings.TrimSpace(result.Report) != "" {
-			if report.Len() > 0 {
-				report.WriteString("\n\n")
-			}
-
-			report.WriteString(strings.TrimSpace(result.Report))
-			report.WriteString("\n")
+		if report := strings.TrimSpace(result.Report); report != "" {
+			combined.Reports[playlist.Name] = report + "\n"
+			combined.ReportOrder = append(combined.ReportOrder, playlist.Name)
 		}
 
 		if playlist.SizeBytes > 0 {
@@ -449,13 +502,36 @@ func runSelectedScan(
 		}
 	}
 
-	combined.Report = normalizeReportDiscLabel(
-		source,
-		report.String(),
-	)
 	combined.DurationMS = time.Since(started).Milliseconds()
-
 	return &combined, nil
+}
+
+func mergeScanInfo(dst *bdinfo.ScanInfo, src bdinfo.ScanInfo, scope string) {
+	if src.ScanError != "" {
+		message := src.ScanError
+		if scope != "" {
+			message = scope + ": " + message
+		}
+		if dst.ScanError == "" {
+			dst.ScanError = message
+		} else if !strings.Contains(dst.ScanError, message) {
+			dst.ScanError += "\n" + message
+		}
+	}
+
+	if len(src.FileErrors) == 0 {
+		return
+	}
+	if dst.FileErrors == nil {
+		dst.FileErrors = make(map[string]string, len(src.FileErrors))
+	}
+	for name, message := range src.FileErrors {
+		key := name
+		if existing, ok := dst.FileErrors[key]; ok && existing != message {
+			key = scope + ":" + name
+		}
+		dst.FileErrors[key] = message
+	}
 }
 
 func resolveRequestedPlaylist(ctx context.Context, source, requested string) (string, error) {
@@ -464,12 +540,7 @@ func resolveRequestedPlaylist(ctx context.Context, source, requested string) (st
 		return "", nil
 	}
 
-	settings := bdinfo.DefaultSettings(".")
-
-	discovery, err := bdinfo.DiscoverPlaylists(ctx, bdinfo.Options{
-		Path:     source,
-		Settings: settings,
-	})
+	discovery, err := discoverPlaylistsBounded(ctx, source)
 	if err != nil {
 		return "", err
 	}
@@ -492,6 +563,11 @@ func handleScans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if hasActiveScan() {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: errScanAlreadyRunning.Error()})
+		return
+	}
+
 	var req scanJobRequest
 
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024))
@@ -511,7 +587,6 @@ func handleScans(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
 	req.Path = source
 	req.Mode = strings.ToLower(strings.TrimSpace(req.Mode))
 	if req.Mode == "" {
@@ -520,6 +595,16 @@ func handleScans(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Mode {
 	case "main", "all":
+		if err := validateEngineSourceBounded(r.Context(), source); err != nil {
+			status := http.StatusInternalServerError
+			if isEngineSourceValidationError(err) {
+				status = http.StatusBadRequest
+			} else if errors.Is(err, errScanAlreadyRunning) {
+				status = http.StatusConflict
+			}
+			writeJSON(w, status, errorResponse{Error: err.Error()})
+			return
+		}
 	case "playlist":
 		req.Playlist = strings.TrimSpace(req.Playlist)
 		if req.Playlist == "" {
@@ -531,7 +616,13 @@ func handleScans(w http.ResponseWriter, r *http.Request) {
 
 		playlist, err := resolveRequestedPlaylist(r.Context(), source, req.Playlist)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, errorResponse{
+			status := http.StatusInternalServerError
+			if isEngineSourceValidationError(err) {
+				status = http.StatusBadRequest
+			} else if errors.Is(err, errScanAlreadyRunning) {
+				status = http.StatusConflict
+			}
+			writeJSON(w, status, errorResponse{
 				Error: "playlist discovery failed: " + err.Error(),
 			})
 			return
@@ -561,7 +652,11 @@ func handleScans(w http.ResponseWriter, r *http.Request) {
 			req.Playlists,
 		)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, errorResponse{
+			status := http.StatusBadRequest
+			if errors.Is(err, errScanAlreadyRunning) {
+				status = http.StatusConflict
+			}
+			writeJSON(w, status, errorResponse{
 				Error: err.Error(),
 			})
 			return
@@ -652,6 +747,7 @@ var errScanAlreadyRunning = errors.New("a scan is already running")
 func startScanJob(req scanJobRequest) (*scanJob, error) {
 	scanJobs.Lock()
 	defer scanJobs.Unlock()
+	pruneFinishedJobsLocked(time.Now())
 
 	for _, existing := range scanJobs.jobs {
 		switch existing.Status {
@@ -724,12 +820,20 @@ func startScanJob(req scanJobRequest) (*scanJob, error) {
 }
 
 func consumeScanWorker(id string, cmd *exec.Cmd, protocolRead *os.File, stderr *bytes.Buffer) {
+	consumeScanWorkerWithLimit(id, cmd, protocolRead, stderr, 64*1024*1024)
+}
+
+func consumeScanWorkerWithLimit(id string, cmd *exec.Cmd, protocolRead *os.File, stderr *bytes.Buffer, maxProtocolLine int) {
 	defer protocolRead.Close()
 
 	scanner := bufio.NewScanner(protocolRead)
 
 	// The final BDInfo report can be much larger than Scanner's default 64 KiB.
-	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	initialBuffer := 64 * 1024
+	if maxProtocolLine < initialBuffer {
+		initialBuffer = maxProtocolLine
+	}
+	scanner.Buffer(make([]byte, initialBuffer), maxProtocolLine)
 
 	receivedResult := false
 	workerError := ""
@@ -774,8 +878,17 @@ func consumeScanWorker(id string, cmd *exec.Cmd, protocolRead *os.File, stderr *
 		scanJobs.Unlock()
 	}
 
-	if err := scanner.Err(); err != nil && workerError == "" {
-		workerError = "worker protocol error: " + err.Error()
+	if err := scanner.Err(); err != nil {
+		if workerError == "" {
+			workerError = "worker protocol error: " + err.Error()
+		}
+		// Stop the producer before waiting. If Scanner stopped because a protocol
+		// record exceeded the configured limit, leaving the read side open can
+		// deadlock a worker that is still blocked writing that record.
+		_ = protocolRead.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
 	}
 
 	waitErr := cmd.Wait()
@@ -783,6 +896,7 @@ func consumeScanWorker(id string, cmd *exec.Cmd, protocolRead *os.File, stderr *
 
 	scanJobs.Lock()
 	defer scanJobs.Unlock()
+	defer pruneFinishedJobsLocked(finished)
 
 	job := scanJobs.jobs[id]
 	if job == nil {
@@ -802,6 +916,7 @@ func consumeScanWorker(id string, cmd *exec.Cmd, protocolRead *os.File, stderr *
 	if workerError != "" {
 		job.Status = "failed"
 		job.Error = workerError
+		job.Result = nil
 		return
 	}
 
@@ -814,12 +929,14 @@ func consumeScanWorker(id string, cmd *exec.Cmd, protocolRead *os.File, stderr *
 		}
 
 		job.Error = message
+		job.Result = nil
 		return
 	}
 
 	if !receivedResult || job.Result == nil {
 		job.Status = "failed"
 		job.Error = "scan worker exited without returning a result"
+		job.Result = nil
 		return
 	}
 
@@ -955,6 +1072,8 @@ func snapshotScanJobLocked(job *scanJob) *scanJob {
 	if job.Result != nil {
 		resultCopy := *job.Result
 		resultCopy.Report = ""
+		resultCopy.Reports = nil
+		resultCopy.ReportOrder = nil
 		copy.Result = &resultCopy
 	}
 

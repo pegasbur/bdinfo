@@ -7,15 +7,34 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: bdinfo-publish
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout sanitized public main
+      - name: Require main dispatch
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main" || {
+            echo "Publish must be dispatched from main; got $GITHUB_REF" >&2
+            exit 1
+          }
+
+      - name: Checkout exact dispatched commit
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Record checked-out source commit
+        shell: bash
+        run: |
+          BUILD_SHA="$(git rev-parse HEAD)"
+          test "$BUILD_SHA" = "$GITHUB_SHA"
+          echo "BUILD_SHA=$BUILD_SHA" >> "$GITHUB_ENV"
 
       - name: Read release pins
         id: versions
@@ -80,7 +99,7 @@ jobs:
             NODE_VERSION=${{ steps.versions.outputs.node }}
             DEBIAN_CODENAME=${{ steps.versions.outputs.debian }}
             APP_VERSION=${{ steps.versions.outputs.release_version }}
-            VCS_REF=${{ github.sha }}
+            VCS_REF=${{ env.BUILD_SHA }}
             UPSTREAM_VERSION=${{ steps.versions.outputs.upstream_version }}
             UPSTREAM_COMMIT=${{ steps.versions.outputs.upstream_commit }}
 
@@ -95,11 +114,12 @@ jobs:
           docker pull "$PUBLISHED_IMAGE"
 
           test "$(docker inspect "$PUBLISHED_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$RELEASE_VERSION"
-          test "$(docker inspect "$PUBLISHED_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+          test "$(docker inspect "$PUBLISHED_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$BUILD_SHA"
           test "$(docker inspect "$PUBLISHED_IMAGE" --format '{{ index .Config.Labels "io.pegasbur.bdinfo.upstream.version" }}')" = "$UPSTREAM_VERSION"
           test "$(docker inspect "$PUBLISHED_IMAGE" --format '{{ index .Config.Labels "io.pegasbur.bdinfo.upstream.revision" }}')" = "$UPSTREAM_COMMIT"
 
-          mkdir -p "$RUNNER_TEMP/bdinfo-config" "$RUNNER_TEMP/bdinfo-data"
+          mkdir -p "$RUNNER_TEMP/bdinfo-config" "$RUNNER_TEMP/bdinfo-data/test"
+          sudo chown -R 99:100 "$RUNNER_TEMP/bdinfo-config"
           docker run -d --rm \
             --name bdinfo-release-check \
             -p 4646:4646 \
@@ -115,6 +135,13 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:4646/api/health
+          test -f "$RUNNER_TEMP/bdinfo-config/config.json"
+          curl -fsS \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"Smoke Test","path":"/data/test"}' \
+            http://127.0.0.1:4646/api/locations >/dev/null
+          grep -q 'Smoke Test' "$RUNNER_TEMP/bdinfo-config/config.json"
+          test "$(docker inspect bdinfo-release-check --format '{{.Config.User}}')" = "99:100"
 
       - name: Create moving aliases from verified immutable digest
         env:
@@ -132,6 +159,6 @@ jobs:
         shell: bash
         run: |
           gh release create "$RELEASE_TAG" \
-            --target "$GITHUB_SHA" \
+            --target "$BUILD_SHA" \
             --title "BDInfo $RELEASE_VERSION" \
             --generate-notes

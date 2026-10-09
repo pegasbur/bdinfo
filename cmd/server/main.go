@@ -28,11 +28,13 @@ type discoverResponse struct {
 }
 
 type scanResponse struct {
-	Disc       bdinfo.DiscInfo       `json:"disc"`
-	Playlists  []bdinfo.PlaylistInfo `json:"playlists"`
-	Scan       bdinfo.ScanInfo       `json:"scan"`
-	Report     string                `json:"report,omitempty"`
-	DurationMS int64                 `json:"durationMs"`
+	Disc        bdinfo.DiscInfo       `json:"disc"`
+	Playlists   []bdinfo.PlaylistInfo `json:"playlists"`
+	Scan        bdinfo.ScanInfo       `json:"scan"`
+	Report      string                `json:"report,omitempty"`
+	Reports     map[string]string     `json:"reports,omitempty"`
+	ReportOrder []string              `json:"reportOrder,omitempty"`
+	DurationMS  int64                 `json:"durationMs"`
 }
 
 type errorResponse struct {
@@ -79,7 +81,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           requestSecurity(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -89,6 +91,11 @@ func main() {
 }
 
 func handleDiscover(w http.ResponseWriter, r *http.Request) {
+	if hasActiveScan() {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: errScanAlreadyRunning.Error()})
+		return
+	}
+
 	var req discoverRequest
 
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024))
@@ -108,19 +115,17 @@ func handleDiscover(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	settings := bdinfo.DefaultSettings(".")
-
 	started := time.Now()
 
-	result, err := bdinfo.DiscoverPlaylists(r.Context(), bdinfo.Options{
-		Path:     source,
-		Settings: settings,
-	})
+	result, err := discoverPlaylistsBounded(r.Context(), source)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{
-			Error: err.Error(),
-		})
+		status := http.StatusInternalServerError
+		if isEngineSourceValidationError(err) {
+			status = http.StatusBadRequest
+		} else if errors.Is(err, errScanAlreadyRunning) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, errorResponse{Error: err.Error()})
 		return
 	}
 
@@ -230,8 +235,12 @@ func validateSource(input string) (string, error) {
 		return "", errors.New("source not accessible: " + err.Error())
 	}
 
-	if !info.IsDir() && !strings.EqualFold(filepath.Ext(source), ".iso") {
-		return "", errors.New("source must be a Blu-ray directory or ISO file")
+	if info.IsDir() {
+		return source, nil
+	}
+
+	if !strings.EqualFold(filepath.Ext(source), ".iso") || !info.Mode().IsRegular() {
+		return "", errors.New("source must be a Blu-ray directory or regular ISO file")
 	}
 
 	return source, nil

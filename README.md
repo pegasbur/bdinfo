@@ -46,8 +46,8 @@ The primary tested platform is AMD64 Unraid, but the image can also run on an AM
 - [Image tags](#image-tags)
 - [Upstream Engine](#upstream-engine)
 - [Files and persistence](#files-and-persistence)
-- [Updating](#updating)
 - [Network access and security](#network-access-and-security)
+- [Updating](#updating)
 - [Remark](#copy-protected-discs)
 - [Support](#support)
 

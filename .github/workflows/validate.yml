@@ -74,9 +74,16 @@ jobs:
       - name: Validate Compose
         run: docker compose -f compose.yaml config -q
 
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
       - name: Build runtime image
         run: |
-          docker build \
+          docker buildx build --load \
             --build-arg "GO_VERSION=$GO_VERSION" \
             --build-arg "NODE_VERSION=$NODE_VERSION" \
             --build-arg "DEBIAN_CODENAME=$DEBIAN_CODENAME" \

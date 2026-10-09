@@ -44,12 +44,11 @@ The primary tested platform is AMD64 Unraid, but the image can also run on an AM
 - [Run with Docker](#run-with-docker)
 - [Docker Compose](#docker-compose)
 - [Image tags](#image-tags)
-- [Storage and report behavior](#storage-and-report-behavior)
-- [Source-path safety](#source-path-safety)
-- [Network access and security](#network-access-and-security)
+- [Upstream Engine](#upstream-engine)
+- [Files and persistence](#files-and-persistence)
 - [Updating](#updating)
-- [Upstream engine](#upstream-engine)
-- [Copy-protected discs](#copy-protected-discs)
+- [Network access and security](#network-access-and-security)
+- [Remark](#copy-protected-discs)
 - [Support](#support)
 
 ## Features
@@ -155,6 +154,17 @@ The supplied Compose file persists `/config` and mounts `/data` read-only.
 | `ghcr.io/pegasbur/bdinfo:0.4.2` | Current upstream application-version alias |
 | `ghcr.io/pegasbur/bdinfo:0.4.2-r2` | Application and wrapper-revision tag; do not overwrite |
 
+## Upstream engine
+
+The current application is pinned to:
+
+```text
+github.com/autobrr/go-bdinfo v0.4.2
+```
+
+Wrapper releases preserve exact upstream provenance in `versions.env` and image labels.
+
+
 ## Files and persistence
 
 The principal container paths are the same on Unraid and Docker:
@@ -165,10 +175,6 @@ The principal container paths are the same on Unraid and Docker:
 | Media | `/mnt/user/data` | `/data` | read-only |
 
 Additional host directories can be mapped when required.
-
-## Network access and security
-
-BDInfo has no built-in user authentication. The WebUI is intended for a trusted LAN, Tailscale, or an authenticated HTTPS reverse proxy and should not be exposed directly to the public Internet.
 
 ## Updating
 
@@ -193,15 +199,9 @@ docker compose pull
 docker compose up -d
 ```
 
-## Upstream engine
+## Network access and security
 
-The current application is pinned to:
-
-```text
-github.com/autobrr/go-bdinfo v0.4.2
-```
-
-Wrapper releases preserve exact upstream provenance in `versions.env` and image labels.
+BDInfo has no built-in user authentication. The WebUI is intended for a trusted LAN, Tailscale, or an authenticated HTTPS reverse proxy and should not be exposed directly to the public Internet.
 
 ## Remark
 
